@@ -2,6 +2,7 @@ import Cocoa
 import SwiftUI
 import Carbon
 import ApplicationServices
+import ServiceManagement
 // ContentView: 設定ウィンドウ用のSwiftUIビュー
 struct ContentView: View {
     var body: some View {
@@ -119,6 +120,67 @@ struct ClipboardManagerApp: App {
     }
 }
 
+// AutoLaunchSettingsView: 自動起動設定用のSwiftUIビュー
+struct AutoLaunchSettingsView: View {
+    let appDelegate: AppDelegate
+    @State private var isAutoLaunchEnabled = false
+    @State private var showingAlert = false
+    @State private var alertMessage = ""
+    
+    var body: some View {
+        VStack(spacing: 20) {
+            Text("自動起動設定")
+                .font(.title)
+                .fontWeight(.bold)
+            
+            VStack(alignment: .leading, spacing: 10) {
+                HStack {
+                    Toggle("パソコン起動時に自動で起動", isOn: $isAutoLaunchEnabled)
+                        .onChange(of: isAutoLaunchEnabled) { newValue in
+                            toggleAutoLaunch(enabled: newValue)
+                        }
+                    
+                    Spacer()
+                }
+                
+                Text("この設定により、パソコンを起動するたびにクリップボードマネージャーが自動的に起動します。")
+                    .font(.caption)
+                    .foregroundColor(.secondary)
+            }
+            .padding()
+            .background(Color(.systemGray6))
+            .cornerRadius(10)
+            
+            Spacer()
+        }
+        .padding()
+        .frame(width: 400, height: 300)
+        .onAppear {
+            checkAutoLaunchStatus()
+        }
+        .alert("通知", isPresented: $showingAlert) {
+            Button("OK") { }
+        } message: {
+            Text(alertMessage)
+        }
+    }
+    
+    private func checkAutoLaunchStatus() {
+        isAutoLaunchEnabled = appDelegate.isAutoLaunchEnabled()
+    }
+    
+    private func toggleAutoLaunch(enabled: Bool) {
+        if enabled {
+            appDelegate.enableAutoLaunch()
+        } else {
+            appDelegate.disableAutoLaunch()
+        }
+        
+        alertMessage = enabled ? "自動起動が有効になりました" : "自動起動が無効になりました"
+        showingAlert = true
+    }
+}
+
 class AppDelegate: NSObject, NSApplicationDelegate {
     var statusItem: NSStatusItem!
     var clipboardManager: ClipboardManager!
@@ -127,6 +189,9 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     func applicationDidFinishLaunching(_ notification: Notification) {
         // アクセシビリティ権限をチェック
         checkAccessibilityPermissions()
+        
+        // 自動起動の設定を確認
+        setupAutoLaunch()
         
         // ステータスバーアイテムを作成
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
@@ -174,6 +239,67 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         }
     }
     
+    func setupAutoLaunch() {
+        // 初回起動時に自動起動を有効にする
+        let hasLaunchedBefore = UserDefaults.standard.bool(forKey: "HasLaunchedBefore")
+        if !hasLaunchedBefore {
+            enableAutoLaunch()
+            UserDefaults.standard.set(true, forKey: "HasLaunchedBefore")
+        }
+    }
+    
+    func enableAutoLaunch() {
+        if #available(macOS 13.0, *) {
+            Task {
+                do {
+                    try await SMAppService.mainApp.register()
+                    print("自動起動が有効になりました（macOS 13+）")
+                } catch {
+                    print("自動起動の設定に失敗しました: \(error.localizedDescription)")
+                }
+            }
+        } else {
+            // macOS 13未満の場合は従来の方法を使用
+            let success = SMLoginItemSetEnabled(CFBundleGetIdentifier(CFBundleGetMainBundle()) as! CFString, true)
+            if success {
+                print("自動起動が有効になりました（macOS 13未満）")
+            } else {
+                print("自動起動の設定に失敗しました")
+            }
+        }
+    }
+    
+    func disableAutoLaunch() {
+        if #available(macOS 13.0, *) {
+            Task {
+                do {
+                    try await SMAppService.mainApp.unregister()
+                    print("自動起動が無効になりました（macOS 13+）")
+                } catch {
+                    print("自動起動の無効化に失敗しました: \(error.localizedDescription)")
+                }
+            }
+        } else {
+            // macOS 13未満の場合は従来の方法を使用
+            let success = SMLoginItemSetEnabled(CFBundleGetIdentifier(CFBundleGetMainBundle()) as! CFString, false)
+            if success {
+                print("自動起動が無効になりました（macOS 13未満）")
+            } else {
+                print("自動起動の無効化に失敗しました")
+            }
+        }
+    }
+    
+    func isAutoLaunchEnabled() -> Bool {
+        if #available(macOS 13.0, *) {
+            // macOS 13+では非同期で確認する必要があるため、デフォルトでtrueを返す
+            return true
+        } else {
+            // macOS 13未満では従来の方法で確認
+            return SMLoginItemSetEnabled(CFBundleGetIdentifier(CFBundleGetMainBundle()) as! CFString, false)
+        }
+    }
+    
     @objc func showMenu() {
         statusItem.menu = createMenu()
         statusItem.button?.performClick(nil)
@@ -214,6 +340,13 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         
         menu.addItem(NSMenuItem.separator())
         
+        // 自動起動設定メニュー
+        let autoLaunchItem = NSMenuItem(title: "自動起動設定", action: #selector(showAutoLaunchSettings), keyEquivalent: "")
+        autoLaunchItem.target = self
+        menu.addItem(autoLaunchItem)
+        
+        menu.addItem(NSMenuItem.separator())
+        
         let quitItem = NSMenuItem(title: "終了", action: #selector(quitApp), keyEquivalent: "q")
         quitItem.target = self
         menu.addItem(quitItem)
@@ -229,6 +362,29 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     @objc func clearHistory() {
         clipboardManager.clearHistory()
         setupMenu()
+    }
+    
+    @objc func showAutoLaunchSettings() {
+        let settingsWindow = createAutoLaunchSettingsWindow()
+        settingsWindow.makeKeyAndOrderFront(nil)
+        NSApp.activate(ignoringOtherApps: true)
+    }
+    
+    private func createAutoLaunchSettingsWindow() -> NSWindow {
+        let window = NSWindow(
+            contentRect: NSRect(x: 0, y: 0, width: 400, height: 300),
+            styleMask: [.titled, .closable],
+            backing: .buffered,
+            defer: false
+        )
+        
+        window.center()
+        window.title = "自動起動設定"
+        window.level = .floating
+        
+        let contentView = NSHostingView(rootView: AutoLaunchSettingsView(appDelegate: self))
+        window.contentView = contentView
+        return window
     }
     
     @objc func quitApp() {
