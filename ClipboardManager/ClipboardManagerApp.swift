@@ -148,7 +148,7 @@ struct AutoLaunchSettingsView: View {
                     .foregroundColor(.secondary)
             }
             .padding()
-            .background(Color(.systemGray6))
+            .background(Color(.systemGray))
             .cornerRadius(10)
             
             Spacer()
