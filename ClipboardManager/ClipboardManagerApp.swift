@@ -120,71 +120,24 @@ struct ClipboardManagerApp: App {
     }
 }
 
-// AutoLaunchSettingsView: 自動起動設定用のSwiftUIビュー
-struct AutoLaunchSettingsView: View {
-    let appDelegate: AppDelegate
-    @State private var isAutoLaunchEnabled = false
-    @State private var showingAlert = false
-    @State private var alertMessage = ""
-    
-    var body: some View {
-        VStack(spacing: 20) {
-            Text("自動起動設定")
-                .font(.title)
-                .fontWeight(.bold)
-            
-            VStack(alignment: .leading, spacing: 10) {
-                HStack {
-                    Toggle("パソコン起動時に自動で起動", isOn: $isAutoLaunchEnabled)
-                        .onChange(of: isAutoLaunchEnabled) { newValue in
-                            toggleAutoLaunch(enabled: newValue)
-                        }
-                    
-                    Spacer()
-                }
-                
-                Text("この設定により、パソコンを起動するたびにクリップボードマネージャーが自動的に起動します。")
-                    .font(.caption)
-                    .foregroundColor(.secondary)
-            }
-            .padding()
-            .background(Color(.systemGray))
-            .cornerRadius(10)
-            
-            Spacer()
-        }
-        .padding()
-        .frame(width: 400, height: 300)
-        .onAppear {
-            checkAutoLaunchStatus()
-        }
-        .alert("通知", isPresented: $showingAlert) {
-            Button("OK") { }
-        } message: {
-            Text(alertMessage)
-        }
-    }
-    
-    private func checkAutoLaunchStatus() {
-        isAutoLaunchEnabled = appDelegate.isAutoLaunchEnabled()
-    }
-    
-    private func toggleAutoLaunch(enabled: Bool) {
-        if enabled {
-            appDelegate.enableAutoLaunch()
-        } else {
-            appDelegate.disableAutoLaunch()
-        }
-        
-        alertMessage = enabled ? "自動起動が有効になりました" : "自動起動が無効になりました"
-        showingAlert = true
-    }
-}
 
-class AppDelegate: NSObject, NSApplicationDelegate {
+class AppDelegate: NSObject, NSApplicationDelegate, AutoLaunchManaging, MenuBarIconApplying {
     var statusItem: NSStatusItem!
     var clipboardManager: ClipboardManager!
     var hotKeyManager: HotKeyManager!
+    private let imageAdjustmentStore = ImageAdjustmentSettingsStore()
+    private let menuBarIconAdjuster = MenuBarIconAdjuster()
+    private let quickMemoStore = QuickMemoStore()
+    private let todoListStore = TodoListStore()
+    private let todoHistoryStore = TodoHistoryStore()
+    private let imageBatchSettingsStore = ImageBatchSettingsStore()
+    private let outputPresetStore = OutputSizePresetStore()
+    private let outputLocationStore = OutputLocationStore()
+    private let imageProcessingTodoStore = ImageProcessingTodoStore()
+    private var autoLaunchWindow: NSWindow?
+    private var imageAdjustmentWindow: NSWindow?
+    private var quickMemoWindow: NSWindow?
+    private var todoListWindow: NSWindow?
     
     func applicationDidFinishLaunching(_ notification: Notification) {
         // アクセシビリティ権限をチェック
@@ -197,13 +150,10 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
         
         if let button = statusItem.button {
-            if let image = NSImage(named: "MenuBarIcon") {
-                image.isTemplate = true
+            if let image = adjustedMenuBarImage() {
                 button.image = image
-                print("メニューバーアイコン（MenuBarIcon）を正常に読み込みました")
             } else {
-                print("MenuBarIconの読み込みに失敗。システムアイコン（clipboard）にフォールバック")
-                button.image = NSImage(systemSymbolName: "clipboard", accessibilityDescription: "Clipboard Manager")
+                print("MenuBarIconの読み込みに失敗。システムアイコンの表示にも失敗しました")
             }
             button.action = #selector(showMenu)
             button.target = self
@@ -305,6 +255,13 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         statusItem.button?.performClick(nil)
     }
     
+    func applyMenuBarIconAdjustments() {
+        guard let button = statusItem.button else { return }
+        if let image = adjustedMenuBarImage() {
+            button.image = image
+        }
+    }
+    
     func setupMenu() {
         let menu = createMenu()
         statusItem.menu = menu
@@ -345,6 +302,18 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         autoLaunchItem.target = self
         menu.addItem(autoLaunchItem)
         
+        let imageAdjustmentItem = NSMenuItem(title: "画像の調整", action: #selector(showImageAdjustmentSettings), keyEquivalent: "")
+        imageAdjustmentItem.target = self
+        menu.addItem(imageAdjustmentItem)
+        
+        let quickMemoItem = NSMenuItem(title: "クイックメモ", action: #selector(showQuickMemo), keyEquivalent: "")
+        quickMemoItem.target = self
+        menu.addItem(quickMemoItem)
+        
+        let todoListItem = NSMenuItem(title: "ToDoリスト", action: #selector(showTodoList), keyEquivalent: "")
+        todoListItem.target = self
+        menu.addItem(todoListItem)
+        
         menu.addItem(NSMenuItem.separator())
         
         let quitItem = NSMenuItem(title: "終了", action: #selector(quitApp), keyEquivalent: "q")
@@ -365,14 +334,15 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     }
     
     @objc func showAutoLaunchSettings() {
-        let settingsWindow = createAutoLaunchSettingsWindow()
+        let settingsWindow = autoLaunchWindow ?? createAutoLaunchSettingsWindow()
+        autoLaunchWindow = settingsWindow
         settingsWindow.makeKeyAndOrderFront(nil)
         NSApp.activate(ignoringOtherApps: true)
     }
     
     private func createAutoLaunchSettingsWindow() -> NSWindow {
         let window = NSWindow(
-            contentRect: NSRect(x: 0, y: 0, width: 400, height: 300),
+            contentRect: NSRect(x: 0, y: 0, width: 420, height: 220),
             styleMask: [.titled, .closable],
             backing: .buffered,
             defer: false
@@ -382,13 +352,117 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         window.title = "自動起動設定"
         window.level = .floating
         
-        let contentView = NSHostingView(rootView: AutoLaunchSettingsView(appDelegate: self))
+        let contentView = NSHostingView(rootView: AutoLaunchSettingsView(autoLaunchManager: self))
+        window.contentView = contentView
+        return window
+    }
+    
+    @objc func showImageAdjustmentSettings() {
+        let settingsWindow = imageAdjustmentWindow ?? createImageAdjustmentSettingsWindow()
+        imageAdjustmentWindow = settingsWindow
+        settingsWindow.makeKeyAndOrderFront(nil)
+        NSApp.activate(ignoringOtherApps: true)
+    }
+    
+    private func createImageAdjustmentSettingsWindow() -> NSWindow {
+        let window = NSWindow(
+            contentRect: NSRect(x: 0, y: 0, width: 940, height: 660),
+            styleMask: [.titled, .closable, .resizable],
+            backing: .buffered,
+            defer: false
+        )
+        
+        window.center()
+        window.title = "画像の調整"
+        window.level = .floating
+        
+        let contentView = NSHostingView(
+            rootView: ImageAdjustmentView(
+                store: imageAdjustmentStore,
+                iconApplier: self,
+                settingsStore: imageBatchSettingsStore,
+                presetStore: outputPresetStore,
+                locationStore: outputLocationStore,
+                todoStore: imageProcessingTodoStore
+            )
+        )
+        window.contentView = contentView
+        return window
+    }
+    
+    @objc func showQuickMemo() {
+        let memoWindow = quickMemoWindow ?? createQuickMemoWindow()
+        quickMemoWindow = memoWindow
+        memoWindow.makeKeyAndOrderFront(nil)
+        NSApp.activate(ignoringOtherApps: true)
+    }
+    
+    @objc func showTodoList() {
+        let todoWindow = todoListWindow ?? createTodoListWindow()
+        todoListWindow = todoWindow
+        todoWindow.makeKeyAndOrderFront(nil)
+        NSApp.activate(ignoringOtherApps: true)
+    }
+    
+    private func createQuickMemoWindow() -> NSWindow {
+        let window = NSWindow(
+            contentRect: NSRect(x: 0, y: 0, width: 640, height: 520),
+            styleMask: [.titled, .closable, .resizable],
+            backing: .buffered,
+            defer: false
+        )
+        
+        window.center()
+        window.title = "クイックメモ"
+        window.level = .floating
+        window.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]
+        window.isMovableByWindowBackground = true
+        
+        let contentView = NSHostingView(rootView: QuickMemoView(store: quickMemoStore))
+        window.contentView = contentView
+        return window
+    }
+    
+    private func createTodoListWindow() -> NSWindow {
+        let window = NSWindow(
+            contentRect: NSRect(x: 0, y: 0, width: 520, height: 520),
+            styleMask: [.titled, .closable, .resizable],
+            backing: .buffered,
+            defer: false
+        )
+        
+        window.center()
+        window.title = "ToDoリスト"
+        window.level = .floating
+        window.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]
+        window.isMovableByWindowBackground = true
+        
+        let contentView = NSHostingView(rootView: TodoListView(store: todoListStore, historyStore: todoHistoryStore))
         window.contentView = contentView
         return window
     }
     
     @objc func quitApp() {
         NSApplication.shared.terminate(nil)
+    }
+    
+    private func adjustedMenuBarImage() -> NSImage? {
+        guard let baseImage = baseMenuBarImage() else { return nil }
+        
+        let settings = imageAdjustmentStore.load()
+        let adjusted = menuBarIconAdjuster.adjustedImage(from: baseImage, settings: settings)
+        adjusted.isTemplate = !settings.usesCustomColors
+        return adjusted
+    }
+    
+    private func baseMenuBarImage() -> NSImage? {
+        if let image = NSImage(named: "MenuBarIcon") {
+            print("メニューバーアイコン（MenuBarIcon）を正常に読み込みました")
+            return image
+        }
+        
+        print("MenuBarIconの読み込みに失敗。システムアイコン（clipboard）にフォールバック")
+        return NSImage(systemSymbolName: "clipboard", accessibilityDescription: "Clipboard Manager")
     }
 }
 
